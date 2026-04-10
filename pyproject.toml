@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nrk-psapi"
-version = "0.0.0"
+version = "0.12.0a0+hph"
 description = "Unofficial python library for interacting with the NRK Podcast API."
 documentation = "https://nrk-psapi.readthedocs.io/en/latest/"
 homepage = "https://github.com/bendikrb/nrk-psapi"
