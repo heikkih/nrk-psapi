@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import aiohttp
 from aresponses import ResponsesMockServer
@@ -97,6 +98,37 @@ async def test_async_get_access_token_with_valid_credentials(nrk_default_auth_cl
     async with nrk_default_auth_client() as auth_client:
         access_token = await auth_client.async_get_access_token()
         assert access_token == default_credentials.access_token
+
+
+async def test_async_get_access_token_refreshed_updates_expired_credentials(
+    nrk_default_auth_client, default_credentials, default_login_details
+):
+    """Expired credentials should be refreshed when login details exist."""
+    async with nrk_default_auth_client(
+        credentials=default_credentials, login_details=default_login_details
+    ) as auth_client:
+        auth_client.authorize = AsyncMock(return_value=default_credentials)
+
+        access_token = await auth_client.async_get_access_token_refreshed()
+
+        assert access_token == default_credentials.access_token
+        auth_client.authorize.assert_awaited_once()
+
+
+async def test_async_get_access_token_refreshed_does_not_refresh_without_login_details(
+    nrk_default_auth_client, default_credentials
+):
+    """Expired credentials should not be refreshed when login details are missing."""
+    async with nrk_default_auth_client(
+        credentials=default_credentials,
+        load_default_login_details=False,
+    ) as auth_client:
+        auth_client.authorize = AsyncMock(return_value=default_credentials)
+
+        access_token = await auth_client.async_get_access_token_refreshed()
+
+        assert access_token == default_credentials.access_token
+        auth_client.authorize.assert_not_awaited()
 
     async with NrkAuthClient(credentials=default_credentials) as auth_client:
         access_token = await auth_client.async_get_access_token()

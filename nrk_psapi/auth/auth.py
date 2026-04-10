@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from asyncio import TimeoutError
+import asyncio
 import contextlib
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -75,6 +75,7 @@ class NrkAuthClient:
         """Get access token."""
         if self._credentials is None and self.login_details is None:
             raise NrkPsApiNoCredentialsOrLoginDetailsError("No credentials or login details set")
+
         if self._credentials is None:
             try:
                 credentials = await self.authorize(self.login_details)
@@ -86,6 +87,24 @@ class NrkAuthClient:
             self.set_credentials(credentials)
 
         return self._credentials.access_token
+
+    async def async_get_access_token_refreshed(self) -> str:
+        """Get access token and refresh expired credentials when possible."""
+        if (
+            self._credentials is not None
+            and self._credentials.is_expired()
+            and self.login_details is not None
+        ):
+            try:
+                credentials = await self.authorize(self.login_details)
+            except NrkPsApiAuthenticationError as err:
+                raise NrkPsApiAuthenticationError("Unable to refresh access token") from err
+            except NrkPsApiConnectionError as err:
+                _LOGGER.warning("Unable to refresh access token: %s", err)
+                raise
+            self.set_credentials(credentials)
+
+        return await self.async_get_access_token()
 
     async def get_user_id(self) -> str:
         """Get user id."""
@@ -248,7 +267,7 @@ class NrkAuthClient:
             callback_params = dict(callback_url.query)
             auth_data = await self._finalize_login(callback_params)
             return NrkAuthCredentials.from_dict(auth_data)
-        except TimeoutError as exception:
+        except asyncio.TimeoutError as exception:
             raise NrkPsApiConnectionTimeoutError("Timed out while waiting for server response") from exception
         except (ClientError, ClientResponseError) as err:
             raise NrkPsApiConnectionError("Unknown error during authentication") from err

@@ -64,11 +64,20 @@ from .models.search import (
     SingleLetter,
 )
 from .models.userdata import (
+    ContinuationsResponse,
     FavouriteLevel,
     FavouriteType,
+    ProgressContentType,
+    QueueContentType,
+    QueuePositionWhere,
+    QueueResponse,
+    UpNextContentType,
+    UpNextContext,
+    UpNextResponse,
     UserFavourite,
     UserFavouriteNewEpisodesCountResponse,
     UserFavouritesResponse,
+    UserProgressResponse,
 )
 from .utils import (
     fetch_file_info,
@@ -113,6 +122,11 @@ class NrkPodcastAPI:
         if self.cache_directory is not None:
             set_cache_dir(self.cache_directory)
 
+    def _resolve_credentials_path(self, filename: PathLike | None) -> Path:
+        if filename is None:
+            filename = Path(self._conf_dir) / "credentials.json"
+        return Path(filename).resolve()
+
     async def save_credentials(self, filename: PathLike | None = None) -> None:
         """Save the current authentication credentials to a file.
 
@@ -121,9 +135,7 @@ class NrkPodcastAPI:
                 If None, uses the default location.
 
         """
-        if filename is None:
-            filename = Path(self._conf_dir) / "credentials.json"
-        filename = Path(filename).resolve()
+        filename = self._resolve_credentials_path(filename)
         credentials = self.auth_client.get_credentials()
         if credentials is None:  # pragma: no cover
             _LOGGER.warning("Tried to save non-existing credentials")
@@ -139,10 +151,8 @@ class NrkPodcastAPI:
                 If None, uses the default location.
 
         """
-        if filename is None:
-            filename = Path(self._conf_dir) / "credentials.json"
-        filename = Path(filename).resolve()
-        if not filename.exists():
+        filename = self._resolve_credentials_path(filename)
+        if not await asyncio.to_thread(filename.exists):
             _LOGGER.warning("Credentials file does not exist: <%s>", filename)
             return
         async with aiofiles.open(filename) as f:
@@ -157,6 +167,36 @@ class NrkPodcastAPI:
             "Accept": "application/json;api-version=3.5",
             "User-Agent": self.user_agent or f"NrkPodcastAPI/{__version__}",
         }
+
+    @staticmethod
+    def _uri_requires_auth(uri: str) -> bool:
+        """Return True when the endpoint requires authenticated user context.
+
+        Currently this is primarily userdata endpoints, except explicitly anonymous
+        variants.
+        """
+        path = uri.lower().strip()
+        return "/userdata/" in path and "/anonymous/" not in path
+
+    async def _build_request_headers(
+        self,
+        uri: str,
+        headers: dict[str, str] | None,
+        authenticated: bool | None,
+    ) -> dict[str, str]:
+        """Build request headers and inject bearer auth when needed."""
+        request_headers = self.request_header if headers is None else dict(headers)
+
+        if authenticated is None:
+            authenticated = self._uri_requires_auth(uri)
+
+        if authenticated:
+            has_auth_header = any(key.lower() == "authorization" for key in request_headers)
+            if not has_auth_header:
+                access_token = await self.auth_client.async_get_access_token_refreshed()
+                request_headers["authorization"] = f"Bearer {access_token}"
+
+        return request_headers
 
     async def _request_paged_all(
         self,
@@ -222,8 +262,11 @@ class NrkPodcastAPI:
         if base_url is None:
             base_url = PSAPI_BASE_URL
         url = URL(base_url).join(URL(uri))
-        headers = kwargs.get("headers")
-        headers = self.request_header if headers is None else dict(headers)
+        headers = await self._build_request_headers(
+            uri=uri,
+            headers=kwargs.get("headers"),
+            authenticated=kwargs.pop("authenticated", None),
+        )
 
         params = kwargs.get("params")
         if params is not None:
@@ -649,6 +692,143 @@ class NrkPodcastAPI:
             },
         )
         return UserFavourite.from_dict(result)
+
+    async def get_progress(
+        self,
+        content_id: str,
+        content_type: ProgressContentType = ProgressContentType.PODCASTEPISODE,
+        *,
+        source_medium: str = "radio",
+    ) -> UserProgressResponse:
+        """Get progress and reporting interval for a content item."""
+        user_id = await self.auth_client.get_user_id()
+        result = await self._request(
+            f"{source_medium}/userdata/{user_id}/progress/{content_type}/{content_id}"
+        )
+        return UserProgressResponse.from_dict(result)
+
+    async def save_progress(
+        self,
+        content_id: str,
+        position: str,
+        start_playback_position: str,
+        content_type: ProgressContentType = ProgressContentType.PODCASTEPISODE,
+        *,
+        when: datetime | None = None,
+        source_medium: str = "radio",
+    ) -> None:
+        """Save progress for a content item."""
+        user_id = await self.auth_client.get_user_id()
+        await self._request(
+            f"{source_medium}/userdata/{user_id}/progress/{content_type}/{content_id}",
+            method=METH_PUT,
+            json={
+                "position": position,
+                "startPlaybackPosition": start_playback_position,
+                "when": when.isoformat().replace("+00:00", "Z") if when else None,
+            },
+        )
+
+    async def get_upnext(
+        self,
+        content_id: str,
+        content_type: UpNextContentType = UpNextContentType.PODCASTEPISODE,
+        *,
+        context: UpNextContext | None = None,
+        favourite_level: FavouriteLevel | None = None,
+    ) -> UpNextResponse:
+        """Get personalized up-next recommendation for a content item."""
+        user_id = await self.auth_client.get_user_id()
+        result = await self._request(
+            f"radio/userdata/{user_id}/upnext/{content_type}/{content_id}",
+            params={
+                "context": context,
+                "favouriteLevel": favourite_level,
+            },
+        )
+        return UpNextResponse.from_dict(result)
+
+    async def get_queue(self) -> QueueResponse:
+        """Get the user's radio queue."""
+        user_id = await self.auth_client.get_user_id()
+        result = await self._request(f"radio/userdata/{user_id}/queue")
+        return QueueResponse.from_dict(result)
+
+    async def add_to_queue(
+        self,
+        content_id: str,
+        content_type: QueueContentType,
+        *,
+        where: QueuePositionWhere = QueuePositionWhere.LAST,
+        after_id: str | None = None,
+        after_type: QueueContentType | None = None,
+    ) -> QueueResponse:
+        """Add or move an element in the user's queue."""
+        user_id = await self.auth_client.get_user_id()
+        position: dict[str, any] = {"where": str(where)}
+        if where == QueuePositionWhere.AFTER:
+            if after_id is None or after_type is None:
+                raise ValueError("after_id and after_type are required when where='after'")
+            position["after"] = {
+                "id": after_id,
+                "type": str(after_type),
+            }
+
+        result = await self._request(
+            f"radio/userdata/{user_id}/queue/add",
+            method=METH_PUT,
+            json={
+                "id": content_id,
+                "type": str(content_type),
+                "position": position,
+            },
+        )
+        return QueueResponse.from_dict(result)
+
+    async def delete_from_queue(self, content_id: str, content_type: QueueContentType) -> QueueResponse:
+        """Delete an element from the user's queue."""
+        user_id = await self.auth_client.get_user_id()
+        result = await self._request(
+            f"radio/userdata/{user_id}/queue/delete",
+            method=METH_PUT,
+            json={
+                "id": content_id,
+                "type": str(content_type),
+            },
+        )
+        return QueueResponse.from_dict(result)
+
+    async def sync_queue(self, operations: list[dict[str, any]]) -> QueueResponse:
+        """Sync queue operations performed offline."""
+        user_id = await self.auth_client.get_user_id()
+        result = await self._request(
+            f"radio/userdata/{user_id}/queue/sync",
+            method=METH_PUT,
+            json=operations,
+        )
+        return QueueResponse.from_dict(result)
+
+    async def list_continuations(
+        self, key: str | None = None, page_size: int | None = None
+    ) -> ContinuationsResponse:
+        """List continuation items for the user."""
+        user_id = await self.auth_client.get_user_id()
+        result = await self._request(
+            f"radio/userdata/{user_id}/continuations",
+            params={
+                "key": key,
+                "pageSize": page_size,
+            },
+        )
+        return ContinuationsResponse.from_dict(result)
+
+    async def delete_continuation(self, continuation_id: str) -> None:
+        """Delete a continuation item by internal continuation id."""
+        user_id = await self.auth_client.get_user_id()
+        await self._request(
+            f"radio/userdata/{user_id}/continuations/{continuation_id}",
+            method="DELETE",
+        )
 
     @cache(ignore=(0,))
     async def browse(

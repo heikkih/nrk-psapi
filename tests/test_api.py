@@ -27,6 +27,7 @@ from nrk_psapi.models import (
     CategoriesResponse,
     Channel,
     ChannelPlug,
+    ContinuationsResponse,
     Curated,
     CuratedSection,
     Episode,
@@ -55,6 +56,10 @@ from nrk_psapi.models import (
     PodcastType,
     PodcastUmbrella,
     Program,
+    ProgressContentType,
+    QueueContentType,
+    QueuePositionWhere,
+    QueueResponse,
     Recommendation,
     SearchResponse,
     Season,
@@ -63,14 +68,35 @@ from nrk_psapi.models import (
     SeriesPlug,
     SeriesType,
     StandaloneProgramPlug,
+    UpNextContentType,
+    UpNextContext,
+    UpNextResponse,
     UserFavourite,
     UserFavouriteNewEpisodesCountResponse,
     UserFavouritesResponse,
+    UserProgressResponse,
 )
 
 from .helpers import CustomRoute, load_fixture_json, setup_auth_mocks
 
 logger = logging.getLogger(__name__)
+
+
+class _FakeResponse:
+    status = 200
+    headers = {"Content-Type": "application/json"}
+
+    async def text(self):
+        return '{"ok": true}'
+
+
+class _FakeSession:
+    def __init__(self):
+        self.last_headers = {}
+
+    async def request(self, _method, _url, **kwargs):
+        self.last_headers = kwargs.get("headers", {})
+        return _FakeResponse()
 
 
 async def test_ipcheck(aresponses: ResponsesMockServer):
@@ -87,6 +113,30 @@ async def test_ipcheck(aresponses: ResponsesMockServer):
         result = await nrk_api.ipcheck()
         assert isinstance(result, IpCheck)
         assert result.country_code == fixture["data"]["countryCode"]
+
+
+async def test_request_injects_bearer_for_userdata_requests():
+    """Userdata endpoints should include bearer auth automatically."""
+    session = _FakeSession()
+    nrk_api = NrkPodcastAPI(session=session, enable_cache=False)
+    nrk_api.auth_client.async_get_access_token = AsyncMock(return_value="token-123")
+
+    await nrk_api._request("radio/userdata/some-user/favourites")
+
+    assert session.last_headers.get("authorization") == "Bearer token-123"
+    nrk_api.auth_client.async_get_access_token.assert_awaited_once()
+
+
+async def test_request_skips_bearer_for_anonymous_userdata_requests():
+    """Anonymous userdata endpoints should not include bearer auth."""
+    session = _FakeSession()
+    nrk_api = NrkPodcastAPI(session=session, enable_cache=False)
+    nrk_api.auth_client.async_get_access_token = AsyncMock(return_value="token-123")
+
+    await nrk_api._request("radio/userdata/anonymous/upnext/programs/ABC12345678")
+
+    assert "authorization" not in {k.lower(): v for k, v in session.last_headers.items()}
+    nrk_api.auth_client.async_get_access_token.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -450,8 +500,8 @@ async def test_browse(aresponses: ResponsesMockServer, category: str, letter: st
     per_page = 10
     page = 1
 
-    fixture_name = f"radio_search_categories_{category or "alt-innhold"}"
-    uri = f"/radio/search/categories/{category or "alt-innhold"}"
+    fixture_name = f"radio_search_categories_{category or 'alt-innhold'}"
+    uri = f"/radio/search/categories/{category or 'alt-innhold'}"
     uri_qs = {
         "take": per_page,
         "skip": per_page * (page - 1),
@@ -887,6 +937,165 @@ async def test_add_user_favourite(aresponses: ResponsesMockServer, nrk_client, u
         nrk_api: NrkPodcastAPI
         result = await nrk_api.add_user_favourite(FavouriteType(item_type), item_id)
         assert isinstance(result, UserFavourite)
+
+
+async def test_get_progress(aresponses: ResponsesMockServer, nrk_client):
+    user_id = "382cb4d7-aaaa-aaaa-aaaa-000000000000"
+    content_id = "hele_historien|l_6194e7b7-cabd-4da7-94e7-b7cabdfda7a3"
+    aresponses.add(
+        URL(PSAPI_BASE_URL).host,
+        f"/radio/userdata/{user_id}/progress/podcastepisode/{content_id}",
+        "GET",
+        json_response(
+            data={
+                "id": content_id,
+                "progress": "notStarted",
+                "reportInterval": {
+                    "notBefore": "PT5S",
+                    "interval": "PT30S",
+                },
+                "_links": {
+                    "self": {"href": f"/radio/userdata/{user_id}/progress/podcastepisode/{content_id}"}
+                },
+            }
+        ),
+    )
+
+    async with nrk_client() as nrk_api:
+        nrk_api: NrkPodcastAPI
+        result = await nrk_api.get_progress(content_id, ProgressContentType.PODCASTEPISODE)
+        assert isinstance(result, UserProgressResponse)
+        assert result.id == content_id
+        assert result.report_interval is not None
+        assert result.report_interval.interval == "PT30S"
+        result_dict = result.to_dict()
+        assert result_dict["_links"]["self"]["href"].endswith(content_id)
+
+
+async def test_get_upnext(aresponses: ResponsesMockServer, nrk_client):
+    user_id = "382cb4d7-aaaa-aaaa-aaaa-000000000000"
+    content_id = "hele_historien|l_6194e7b7-cabd-4da7-94e7-b7cabdfda7a3"
+    aresponses.add(
+        URL(PSAPI_BASE_URL).host,
+        f"/radio/userdata/{user_id}/upnext/podcastepisode/{content_id}",
+        "GET",
+        json_response(
+            data={
+                "contentId": content_id,
+                "upNextSource": "series",
+                "upNextContentType": "podcastepisode",
+                "_links": {
+                    "self": {"href": f"/radio/userdata/{user_id}/upnext/podcastepisode/{content_id}"},
+                    "next": {"href": f"/radio/userdata/{user_id}/upnext/podcastepisode/{content_id}"},
+                },
+            }
+        ),
+    )
+
+    async with nrk_client() as nrk_api:
+        nrk_api: NrkPodcastAPI
+        result = await nrk_api.get_upnext(
+            content_id,
+            content_type=UpNextContentType.PODCASTEPISODE,
+            context=UpNextContext.SERIES,
+        )
+        assert isinstance(result, UpNextResponse)
+        assert result.content_id == content_id
+        result_dict = result.to_dict()
+        assert result_dict["_links"]["self"]["href"].endswith(content_id)
+
+
+async def test_get_queue(aresponses: ResponsesMockServer, nrk_client):
+    user_id = "382cb4d7-aaaa-aaaa-aaaa-000000000000"
+    aresponses.add(
+        URL(PSAPI_BASE_URL).host,
+        f"/radio/userdata/{user_id}/queue",
+        "GET",
+        json_response(
+            data={
+                "_links": {
+                    "self": {"href": f"/radio/userdata/{user_id}/queue"},
+                    "add": {"href": f"/radio/userdata/{user_id}/queue/add"},
+                    "delete": {"href": f"/radio/userdata/{user_id}/queue/delete"},
+                },
+                "queue": [],
+                "status": {"code": "normal"},
+            }
+        ),
+    )
+
+    async with nrk_client() as nrk_api:
+        nrk_api: NrkPodcastAPI
+        result = await nrk_api.get_queue()
+        assert isinstance(result, QueueResponse)
+        assert isinstance(result.queue, list)
+        result_dict = result.to_dict()
+        assert result_dict["_links"]["self"]["href"].endswith("/queue")
+
+
+async def test_add_to_queue(aresponses: ResponsesMockServer, nrk_client):
+    user_id = "382cb4d7-aaaa-aaaa-aaaa-000000000000"
+    aresponses.add(
+        URL(PSAPI_BASE_URL).host,
+        f"/radio/userdata/{user_id}/queue/add",
+        "PUT",
+        json_response(
+            data={
+                "_links": {
+                    "self": {"href": f"/radio/userdata/{user_id}/queue"},
+                    "add": {"href": f"/radio/userdata/{user_id}/queue/add"},
+                    "delete": {"href": f"/radio/userdata/{user_id}/queue/delete"},
+                },
+                "queue": [{"id": "FNGH28374615", "type": "programs"}],
+                "status": {"code": "normal"},
+            }
+        ),
+    )
+
+    async with nrk_client() as nrk_api:
+        nrk_api: NrkPodcastAPI
+        result = await nrk_api.add_to_queue(
+            "FNGH28374615",
+            QueueContentType.PROGRAMS,
+            where=QueuePositionWhere.FIRST,
+        )
+        assert isinstance(result, QueueResponse)
+        assert result.queue[0].id == "FNGH28374615"
+        assert result.queue[0].type == "programs"
+
+
+async def test_list_and_delete_continuations(aresponses: ResponsesMockServer, nrk_client):
+    user_id = "382cb4d7-aaaa-aaaa-aaaa-000000000000"
+    continuation_id = "9d8e8617-6f53-4a5e-a025-71a9f970f605"
+
+    aresponses.add(
+        URL(PSAPI_BASE_URL).host,
+        f"/radio/userdata/{user_id}/continuations",
+        "GET",
+        json_response(
+            data={
+                "_links": {
+                    "self": {"href": f"/radio/userdata/{user_id}/continuations"},
+                },
+                "continuations": [],
+            }
+        ),
+    )
+    aresponses.add(
+        URL(PSAPI_BASE_URL).host,
+        f"/radio/userdata/{user_id}/continuations/{continuation_id}",
+        "DELETE",
+        aresponses.Response(status=204),
+    )
+
+    async with nrk_client() as nrk_api:
+        nrk_api: NrkPodcastAPI
+        result = await nrk_api.list_continuations(page_size=6)
+        assert isinstance(result, ContinuationsResponse)
+        assert isinstance(result.continuations, list)
+        result_dict = result.to_dict()
+        assert result_dict["_links"]["self"]["href"].endswith("/continuations")
+        await nrk_api.delete_continuation(continuation_id)
 
 
 async def test_no_user_id(nrk_client):
