@@ -43,3 +43,11 @@ class NrkPsAuthorizationError(NrkPsApiError):
 
 class NrkPsAccessDeniedError(NrkPsApiError):
     """NrkPs access denied error."""
+
+
+class NrkPsApiGeoBlockedError(NrkPsAccessDeniedError):
+    """Raised when content or the service is not available from the user's location.
+
+    NRK content is generally only available from Norway and EEA countries.
+    Use :meth:`NrkPodcastAPI.check_availability` to verify access before use.
+    """

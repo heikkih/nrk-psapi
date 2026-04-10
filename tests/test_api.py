@@ -20,6 +20,7 @@ from nrk_psapi.exceptions import (
     NrkPsApiConnectionError,
     NrkPsApiConnectionTimeoutError,
     NrkPsApiError,
+    NrkPsApiGeoBlockedError,
     NrkPsApiNotFoundError,
     NrkPsApiRateLimitError,
 )
@@ -113,6 +114,71 @@ async def test_ipcheck(aresponses: ResponsesMockServer):
         result = await nrk_api.ipcheck()
         assert isinstance(result, IpCheck)
         assert result.country_code == fixture["data"]["countryCode"]
+
+
+async def test_check_availability_passes_for_norwegian_ip(aresponses: ResponsesMockServer):
+    """check_availability() should return IpCheck when the IP has NRK access."""
+    fixture = load_fixture_json("ipcheck")
+    aresponses.add(URL(PSAPI_BASE_URL).host, "/ipcheck", "GET", json_response(data=fixture))
+    async with aiohttp.ClientSession() as session:
+        nrk_api = NrkPodcastAPI(session=session, enable_cache=False)
+        result = await nrk_api.check_availability()
+        assert isinstance(result, IpCheck)
+        assert result.is_ip_norwegian is True
+
+
+async def test_check_availability_raises_for_world_ip(aresponses: ResponsesMockServer):
+    """check_availability() should raise NrkPsApiGeoBlockedError for non-EEA IPs."""
+    blocked_fixture = {
+        "_links": {"self": {"href": "/ipcheck"}},
+        "data": {
+            "clientIpAddress": "1.2.3.4",
+            "countryCode": "US",
+            "isIpNorwegian": False,
+            "lookupSource": "MaxMind",
+            "proxyType": "",
+            "accessGroup": "WORLD",
+        },
+    }
+    aresponses.add(URL(PSAPI_BASE_URL).host, "/ipcheck", "GET", json_response(data=blocked_fixture))
+    async with aiohttp.ClientSession() as session:
+        nrk_api = NrkPodcastAPI(session=session, enable_cache=False)
+        with pytest.raises(NrkPsApiGeoBlockedError, match="US"):
+            await nrk_api.check_availability()
+
+
+async def test_get_playback_manifest_raises_for_geoblocked_content(aresponses: ResponsesMockServer):
+    """get_playback_manifest() should raise NrkPsApiGeoBlockedError for geo-blocked content."""
+    item_id = "l_9a443e59-5c18-45d8-843e-595c18b5d849"
+    blocked_manifest = {
+        "_links": {
+            "self": {"href": f"/playback/manifest/podcast/{item_id}"},
+            "metadata": {"href": f"/playback/metadata/podcast/{item_id}"},
+        },
+        "id": item_id,
+        "playability": "nonPlayable",
+        "streamingMode": "onDemand",
+        "availability": {
+            "information": "Not available outside Norway",
+            "isGeoBlocked": True,
+            "externalEmbeddingAllowed": False,
+        },
+        "statistics": {"snowplow": {"source": "podcast"}},
+        "playable": None,
+        "nonPlayable": {"reason": "geoBlock"},
+        "sourceMedium": "audio",
+        "displayAspectRatio": None,
+    }
+    aresponses.add(
+        URL(PSAPI_BASE_URL).host,
+        f"/playback/manifest/podcast/{item_id}",
+        "GET",
+        json_response(data=blocked_manifest),
+    )
+    async with aiohttp.ClientSession() as session:
+        nrk_api = NrkPodcastAPI(session=session, enable_cache=False)
+        with pytest.raises(NrkPsApiGeoBlockedError, match=item_id):
+            await nrk_api.get_playback_manifest(item_id, podcast=True)
 
 
 async def test_request_injects_bearer_for_userdata_requests():

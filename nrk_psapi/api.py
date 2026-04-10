@@ -25,6 +25,7 @@ from .exceptions import (
     NrkPsApiConnectionError,
     NrkPsApiConnectionTimeoutError,
     NrkPsApiError,
+    NrkPsApiGeoBlockedError,
     NrkPsApiNotFoundError,
     NrkPsApiRateLimitError,
     NrkPsAuthorizationError,
@@ -53,7 +54,7 @@ from .models.pages import (
     Pages,
     PodcastPlug,
 )
-from .models.playback import PodcastManifest
+from .models.playback import PodcastManifest, Playability
 from .models.recommendations import Recommendation, RecommendationContext
 from .models.search import (
     CategoriesResponse,
@@ -321,6 +322,30 @@ class NrkPodcastAPI:
         result = await self._request("ipcheck")
         return IpCheck.from_dict(result["data"])
 
+    async def check_availability(self) -> IpCheck:
+        """Check whether the NRK API is accessible from the current location.
+
+        NRK content is restricted to Norway and certain EEA countries. Call
+        this method during provider setup to give users a clear error message
+        instead of cryptic failures later.
+
+        Returns:
+            IpCheck: IP check result with country and access-group information.
+
+        Raises:
+            NrkPsApiGeoBlockedError: If the current IP address does not have
+                access to NRK content (access_group is ``WORLD``).
+
+        """
+        result = await self.ipcheck()
+        if result.access_group == "WORLD":
+            raise NrkPsApiGeoBlockedError(
+                f"NRK content is not available from your location "
+                f"(country: {result.country_code}, access group: {result.access_group}). "
+                f"NRK is only available from Norway and EEA countries."
+            )
+        return result
+
     async def send_message(
         self,
         podcast_id: str,
@@ -378,7 +403,12 @@ class NrkPodcastAPI:
         else:
             endpoint = ""
         result = await self._request(f"playback/manifest{endpoint}/{item_id}")
-        return PodcastManifest.from_dict(result)
+        manifest = PodcastManifest.from_dict(result)
+        if manifest.playability == Playability.NON_PLAYABLE and manifest.availability.is_geo_blocked:
+            raise NrkPsApiGeoBlockedError(
+                f"Content '{item_id}' is geo-blocked and not available from your location."
+            )
+        return manifest
 
     @cache(ignore=(0,))
     async def get_playback_metadata(

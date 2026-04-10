@@ -3,7 +3,7 @@
 from .api import NrkPodcastAPI
 from .auth import NrkAuthClient, NrkUserLoginDetails
 from .caching import clear_cache, disable_cache, get_cache
-from .exceptions import NrkPsApiError
+from .exceptions import NrkPsApiError, NrkPsApiGeoBlockedError
 from .models.catalog import Episode, Podcast, Series
 from .models.playback import Asset, Playable
 from .rss import NrkPodcastFeed
@@ -20,6 +20,7 @@ __all__ = [
     "NrkPodcastAPI",
     "NrkPodcastFeed",
     "NrkPsApiError",
+    "NrkPsApiGeoBlockedError",
     "NrkUserLoginDetails",
     "Playable",
     "Podcast",
